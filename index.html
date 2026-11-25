@@ -33,7 +33,7 @@ button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:2
 #verdict.ok{background:var(--ok)}#verdict.no{background:var(--no)}#verdict.warn{background:var(--warn);color:#111}
 #vBig{font-size:clamp(64px,22vw,150px);font-weight:800;line-height:1}
 #vMsg{font-size:clamp(24px,7vw,40px);font-weight:800;margin-top:12px}
-#vSub{font-size:20px;margin-top:14px;opacity:.9}
+#vSub{font-size:20px;margin-top:14px;opacity:.9;white-space:pre-line}
 #vTap{position:absolute;bottom:calc(24px + env(safe-area-inset-bottom));font-size:16px;opacity:.85}
 #manual{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;justify-content:center;gap:16px;padding:24px;z-index:4}
 #manual.show{display:flex}
@@ -109,7 +109,9 @@ function analyse(text,now=new Date()){
 }
 // AAMVA PDF417 (Ontario, other provinces, US)
 function parseAAMVA(raw,now=new Date()){
-  const get=k=>{const m=raw.match(new RegExp('[\\n\\r\\x1e]'+k+'([^\\n\\r\\x1e]+)'));return m?m[1].trim():null};
+  const get=k=>{let m=raw.match(new RegExp('[\\n\\r\\x1e\\x1d]'+k+'([^\\n\\r\\x1e\\x1d]+)'));
+    if(!m&&/^DB[ABD]$/.test(k))m=raw.match(new RegExp(k+'(\\d{8})'));   // separators stripped by some readers
+    return m?m[1].trim():null};
   const iin=(raw.match(/ANSI\s?(\d{6})/)||[])[1]||'';
   const canada=/^(6360(1[0-9]|2[0-9])|604|636012|636028)/.test(iin)||/DCGCAN/.test(raw);
   const toDate=s=>{if(!s||!/^\d{8}$/.test(s))return null;
@@ -127,7 +129,7 @@ const LEGAL_AGE=18;
 const $=id=>document.getElementById(id);
 const vid=$('vid'),status=$('status');
 let worker=null,busy=false,paused=false,lastKey=null,stream=null;
-let barcode=null;
+let barcode=null,detectors=[],diag='';
 
 // ---- Counter: counts only, never personal data ----
 const today=new Date().toISOString().slice(0,10);
@@ -142,7 +144,7 @@ const fmt=d=>d.toISOString().slice(0,10);
 function verdict(r){
   paused=true;lastKey=null;bump();
   const v=$('verdict');v.className='show';
-  if(!r){v.classList.add('warn');$('vBig').textContent='?';$('vMsg').textContent='Illisible';$('vSub').textContent='Vérifiez la carte à l\'œil.';}
+  if(!r){v.classList.add('warn');$('vBig').textContent='?';$('vMsg').textContent='Illisible';$('vSub').textContent='Vérifiez la carte à l\'œil.'+'\n['+(detectors.length?(diag||'code-barres non trouvé'):'aucun lecteur de code-barres')+']';}
   else if(r.age<LEGAL_AGE){v.classList.add('no');$('vBig').textContent=r.age+' ans';$('vMsg').textContent='MOINS DE 18 — REFUSER';$('vSub').textContent='Né(e) le '+fmt(r.dob);}
   else if(r.expired){v.classList.add('warn');$('vBig').textContent=r.age+' ans';$('vMsg').textContent='PERMIS EXPIRÉ';$('vSub').textContent='Expiré le '+fmt(r.exp)+' — demandez une autre pièce.';}
   else{v.classList.add('ok');$('vBig').textContent=r.age+' ans';$('vMsg').textContent='18+ — OK';$('vSub').textContent=r.exp?'Valide jusqu\'au '+fmt(r.exp):'Expiration non lue — vérifiez la carte.';}
@@ -169,9 +171,29 @@ function wipe(c){const g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);c.
 
 // ---- Read one frame ----
 // Back of card: PDF417 barcode (Quebec since 2024 cards, Ontario, US). Front: OCR fallback.
-async function readBarcode(src){
-  if(!barcode)return null;
-  try{const codes=await barcode.detect(src);for(const c of codes){const r=parseAAMVA(c.rawValue);if(r)return r}}catch(e){}
+async function readBarcode(src,thorough){
+  const list=thorough?detectors:detectors.slice(0,1);
+  for(const d of list){
+    try{const codes=await d.det.detect(src);
+      if(thorough)diag+=d.name+': '+codes.length+' code(s)'+(codes[0]?' / '+codes[0].rawValue.length+' car.':'')+' · ';
+      for(const c of codes){const r=parseAAMVA(c.rawValue);if(r)return r;else if(thorough)diag+='sans date · '}
+    }catch(e){if(thorough)diag+=d.name+': erreur · '}
+  }
+  return null;
+}
+// Photo: try full size, then smaller copies (very large photos can defeat the reader)
+async function readPhotoBarcode(img){
+  for(const max of [0,2000,1400]){
+    let src=img;
+    if(max&&Math.max(img.width,img.height)>max){
+      const k=max/Math.max(img.width,img.height),c=document.createElement('canvas');
+      c.width=Math.round(img.width*k);c.height=Math.round(img.height*k);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);src=c;
+    }else if(max)continue;
+    const r=await readBarcode(src,true);
+    if(src!==img)wipe(src);
+    if(r)return r;
+  }
   return null;
 }
 async function readOCR(src,w,h,single){
@@ -185,7 +207,7 @@ async function readOCR(src,w,h,single){
   }finally{wipe(c)}
 }
 async function readFrame(src,w,h,single){
-  return (await readBarcode(src))||(await readOCR(src,w,h,single));
+  return (single?await readPhotoBarcode(src):await readBarcode(src,false))||(await readOCR(src,w,h,single));
 }
 
 let tick=0;
@@ -193,8 +215,9 @@ async function loop(){
   if(!paused&&!busy&&vid.readyState>=2){
     busy=true;
     try{
-      let r=await readBarcode(vid);                       // fast: every tick
-      if(!r&&++tick%4===0)r=await readOCR(vid,vid.videoWidth,vid.videoHeight,false); // slow: every 4th
+      let r=null;const d=detectors[tick%Math.max(1,detectors.length)];
+      if(d){try{for(const c of await d.det.detect(vid)){r=parseAAMVA(c.rawValue);if(r)break}}catch(e){}}  // alternate engines
+      if(!r&&++tick%4===0&&worker)r=await readOCR(vid,vid.videoWidth,vid.videoHeight,false); // slow: every 4th
       if(r&&!paused)verdict(r);
     }catch(e){}
     busy=false;
@@ -205,8 +228,8 @@ async function loop(){
 // ---- Photo fallback (no live camera, or tricky lighting) ----
 $('bPhoto').onclick=()=>$('file').click();
 $('file').onchange=async e=>{
-  const f=e.target.files[0];e.target.value='';if(!f)return;
-  paused=true;status.textContent='Lecture…';
+  const f=e.target.files[0];e.target.value='';if(!f)return;diag='';
+  paused=true;diag='';status.textContent='Lecture…';
   const img=await createImageBitmap(f);
   try{const r=await readFrame(img,img.width,img.height,true);verdict(r||null)}
   finally{img.close&&img.close();status.textContent='';}
@@ -216,16 +239,17 @@ $('file').onchange=async e=>{
 $('bManual').onclick=()=>{paused=true;$('manual').classList.add('show');$('mDob').value='';$('mDob').focus()};
 $('mCancel').onclick=()=>{$('manual').classList.remove('show');paused=false};
 $('mDob').addEventListener('input',e=>{let d=e.target.value.replace(/\D/g,'').slice(0,8);if(d.length>6)d=d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6);else if(d.length>4)d=d.slice(0,4)+'-'+d.slice(4);e.target.value=d});
-$('mGo').onclick=()=>{const r=analyse($('mDob').value);$('manual').classList.remove('show');$('mDob').value='';verdict(r&&{...r,exp:null,expired:null}||null)};
+$('mGo').onclick=()=>{diag='';const r=analyse($('mDob').value);$('manual').classList.remove('show');$('mDob').value='';verdict(r&&{...r,exp:null,expired:null}||null)};
 
 // ---- Start ----
 (async()=>{
   try{
-    if('BarcodeDetector' in window){const f=await BarcodeDetector.getSupportedFormats();if(f.includes('pdf417'))barcode=new BarcodeDetector({formats:['pdf417']})}
+    if('BarcodeDetector' in window){const f=await BarcodeDetector.getSupportedFormats();if(f.includes('pdf417'))detectors.push({name:'Android',det:new BarcodeDetector({formats:['pdf417']})})}
   }catch(e){}
-  try{ // iPhone / desktop: same engine via WebAssembly
-    if(!barcode&&window.BarcodeDetectionAPI)barcode=new BarcodeDetectionAPI.BarcodeDetector({formats:['pdf417']});
+  try{ // second engine (zxing, WebAssembly): backup on Android, main on iPhone
+    if(window.BarcodeDetectionAPI)detectors.push({name:'ZXing',det:new BarcodeDetectionAPI.BarcodeDetector({formats:['pdf417']})});
   }catch(e){}
+  barcode=detectors[0]||null;
   try{
     stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1920},height:{ideal:1080}},audio:false});
     vid.srcObject=stream;
