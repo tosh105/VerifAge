@@ -25,7 +25,7 @@ video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 #scanline{position:absolute;left:4%;right:4%;height:3px;background:#fff;opacity:.7;top:10%;animation:sweep 1.6s ease-in-out infinite alternate}
 @keyframes sweep{to{top:88%}}
 @media(prefers-reduced-motion:reduce){#scanline{animation:none;top:50%}}
-#controls{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 16px 16px}
+#controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:12px 16px 16px}
 button,.btn{min-height:56px;border:0;border-radius:14px;font:700 18px/1 inherit;font-family:inherit;color:var(--ink);background:#20252b;cursor:pointer}
 button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:2px}
 #verdict{position:fixed;inset:0;display:none;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:24px;z-index:5}
@@ -56,9 +56,11 @@ button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:2
     <div id="hint">Remplissez la bande avec le <b>code-barres</b> du dos du permis</div>
   </div>
   <div id="controls">
+    <button id="bPhoto">Photo</button>
+    <button id="bGallery">Galerie</button>
     <button id="bManual">Saisir la date</button>
-    <button id="bPhoto">Prendre une photo</button>
-    <input id="file" type="file" accept="image/*" hidden>
+    <input id="file" type="file" accept="image/*" capture="environment" hidden>
+    <input id="file2" type="file" accept="image/*" hidden>
   </div>
   <div class="priv">Rien n'est enregistré : l'image et la date de naissance sont effacées après chaque vérification.</div>
 </div>
@@ -243,13 +245,15 @@ async function loop(){
 
 // ---- Photo fallback (no live camera, or tricky lighting) ----
 $('bPhoto').onclick=()=>$('file').click();
-$('file').onchange=async e=>{
+$('bGallery').onclick=()=>$('file2').click();
+const onPhoto=async e=>{
   const f=e.target.files[0];e.target.value='';if(!f)return;diag='';
   paused=true;diag='';status.textContent='Lecture…';
   const img=await createImageBitmap(f);
   try{const r=await readFrame(img,img.width,img.height,true);verdict(r||null)}
   finally{img.close&&img.close();status.textContent='';}
 };
+$('file').onchange=onPhoto;$('file2').onchange=onPhoto;
 
 // ---- Manual entry ----
 $('bManual').onclick=()=>{paused=true;$('manual').classList.add('show');$('mDob').value='';$('mDob').focus()};
@@ -271,7 +275,7 @@ $('mGo').onclick=()=>{diag='';const r=analyse($('mDob').value);$('manual').class
     vid.srcObject=stream;
     const t=stream.getVideoTracks()[0],cap=t.getCapabilities?t.getCapabilities():{};
     if(cap.focusMode&&cap.focusMode.includes('continuous'))t.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});
-  }catch(e){status.textContent='Caméra non disponible — utilisez « Prendre une photo ».';$('scanline').style.display='none'}
+  }catch(e){status.textContent='Caméra non disponible — utilisez « Photo ».';$('scanline').style.display='none'}
   if(stream){status.textContent='';loop();}
   try{
     worker=await Tesseract.createWorker('eng');
